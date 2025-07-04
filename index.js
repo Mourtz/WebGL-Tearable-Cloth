@@ -15,12 +15,45 @@ const config = {
     mouse: {
         cut: 0.02,
         influence: 0.08
+    },
+    wind: {
+        enabled: true,
+        strength: 0.005,
+        frequency: 0.01,
+        turbulence: 0.003
     }
 };
 
 let spacing = 1.8 / config.clothX;
 let tearDist = spacing * 6;
 let gl = undefined;
+
+// Wind system variables
+let windTime = 0;
+let windBase = { x: 0, y: 0 };
+
+// Wind force calculation function
+function calculateWind(time, x, y) {
+    if (!config.wind.enabled) return { x: 0, y: 0 };
+    
+    // Base wind direction that changes slowly
+    const slowWave = Math.sin(time * 0.5) * 0.5 + 0.5;
+    windBase.x = Math.sin(time * 0.3) * config.wind.strength;
+    windBase.y = Math.cos(time * 0.2) * config.wind.strength * 0.3;
+    
+    // Add turbulence based on position
+    const turbX = Math.sin(time * config.wind.frequency + x * 10) * config.wind.turbulence;
+    const turbY = Math.cos(time * config.wind.frequency + y * 8 + x * 5) * config.wind.turbulence;
+    
+    // Add some perlin-like noise
+    const noise1 = Math.sin(time * 2 + x * 15 + y * 10) * 0.001;
+    const noise2 = Math.cos(time * 1.5 + x * 8 + y * 12) * 0.001;
+    
+    return {
+        x: windBase.x + turbX + noise1,
+        y: windBase.y + turbY + noise2
+    };
+}
 
 // Async fetch function for better performance
 async function fetchHTTP(url) {
@@ -76,6 +109,10 @@ class Point {
         }
 
         this.addForce(0, config.gravity, 0);
+
+        // Apply wind force
+        let wind = calculateWind(windTime, this.x, this.y);
+        this.addForce(wind.x, wind.y, 0);
 
         let nx = this.x + (this.x - this.px) * config.friction + this.vx * delta;
         let ny = this.y + (this.y - this.py) * config.friction + this.vy * delta;
@@ -524,6 +561,19 @@ async function startSimulation() {
         return;
     }
 
+    // Display controls information
+    console.log("=== WebGL Tearable Cloth Demo ===");
+    console.log("Controls:");
+    console.log("  W - Toggle wireframe/points");
+    console.log("  G - Toggle gravity");
+    console.log("  R - Reset cloth");
+    console.log("  V - Toggle wind");
+    console.log("  1 - Decrease wind strength");
+    console.log("  2 - Increase wind strength");
+    console.log("  Left click + drag - Move cloth");
+    console.log("  Right click - Cut cloth");
+    console.log("Wind is ON by default");
+
     // Set up keyboard controls after WebGL is initialized
     document.addEventListener("keypress", function (key) {
         if (key.key === 'w') {
@@ -535,6 +585,18 @@ async function startSimulation() {
             // Update index buffer
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(cloth.indices), gl.STATIC_DRAW);
+        } else if (key.key === 'v') {
+            // Toggle wind on/off
+            config.wind.enabled = !config.wind.enabled;
+            console.log('Wind:', config.wind.enabled ? 'ON' : 'OFF');
+        } else if (key.key === '1') {
+            // Decrease wind strength
+            config.wind.strength = Math.max(0, config.wind.strength - 0.001);
+            console.log('Wind strength:', config.wind.strength.toFixed(3));
+        } else if (key.key === '2') {
+            // Increase wind strength
+            config.wind.strength = Math.min(0.02, config.wind.strength + 0.001);
+            console.log('Wind strength:', config.wind.strength.toFixed(3));
         }
     });
 
@@ -550,6 +612,9 @@ async function startSimulation() {
         const currentTime = performance.now();
         const deltaTime = Math.min((currentTime - lastFrameTime) / 1000.0, 1/30); // Cap at 30fps for stability
         lastFrameTime = currentTime;
+
+        // Update wind time
+        windTime = currentTime * 0.001;
 
         cloth.update(deltaTime);
         render();
