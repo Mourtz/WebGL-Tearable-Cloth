@@ -1,6 +1,7 @@
 <style>
     body {
         background-color: #363636;
+        font-family: Arial, sans-serif;
     }
 
     canvas {
@@ -10,49 +11,44 @@
         background-color: rgba(255, 255, 255, 0);
     }
 
-    m{
+    .controls {
         color: #ffffff;
         position: absolute;
         text-align: center;
         left: 45%;
         bottom: 10%;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 15px;
+        border-radius: 8px;
+    }
+
+    .version-link {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 5px;
+        text-decoration: none;
+        font-size: 14px;
+        transition: background-color 0.3s;
+    }
+
+    .version-link:hover {
+        background: rgba(0, 0, 0, 0.9);
     }
 </style>
 
-<title> WebGL Tearable Cloth </title>
+<title>WebGL Tearable Cloth</title>
 <body>
-    <m>
-        Controls:<br>
-        r-Reset, g-Gravity, w-DrawMode
-    </m>
+    <a href="webgpu.html" class="version-link">🚀 Try WebGPU 3D Version</a>
+    <div class="controls">
+        <strong>Controls:</strong><br>
+        R - Reset | G - Gravity | W - Draw Mode<br>
+        Left Click + Drag - Interact | Right Click - Cut
+    </div>
     <canvas></canvas>
-    <script>
-        let fetchHTTP = function (url, method) {
-            var request = new XMLHttpRequest(),
-                response;
-
-            request.onreadystatechange = function () {
-                if (request.readyState === 4 && request.status === 200) {
-                    response = request.responseText;
-                }
-            }
-            request.open(method ? method : 'GET', url, false);
-            request.overrideMimeType("text/plain");
-            request.send(null);
-            return response;
-        };
-
-        // Provides requestAnimationFrame in a cross browser way.
-        window.requestAnimFrame =
-            window.requestAnimationFrame ||
-            window.webkitRequestAnimationFrame ||
-            window.mozRequestAnimationFrame ||
-            window.oRequestAnimationFrame ||
-            window.msRequestAnimationFrame ||
-            function (callback) {
-                window.setTimeout(callback, 1e3 / 60);
-            };
-    </script>
     <script src="lib/stats.min.js"></script>
     <script src="index.js"></script>
 </body>

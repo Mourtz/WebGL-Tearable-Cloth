@@ -2,18 +2,50 @@ let canvas = document.getElementsByTagName("canvas")[0];
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 
-let accuracy = 5;
-let gravity = -0.02;
-let clothX = 100;
-let clothY = 40;
-let spacing = 1.8 / clothX;
+// Configuration object for better maintainability
+const config = {
+    accuracy: 5,
+    gravity: -0.02,
+    clothX: 100,
+    clothY: 40,
+    friction: 0.99,
+    bounce: 0.5,
+    startX: -0.9,
+    startY: 1.0,
+    mouse: {
+        cut: 0.02,
+        influence: 0.08
+    }
+};
+
+let spacing = 1.8 / config.clothX;
 let tearDist = spacing * 6;
-let friction = 0.99;
-let bounce = 0.5;
-let startX = -0.9;
-let startY = 1.0;
 let gl = undefined;
 
+// Async fetch function for better performance
+async function fetchHTTP(url) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return await response.text();
+    } catch (error) {
+        console.error('Failed to fetch:', url, error);
+        return null;
+    }
+}
+
+// Provides requestAnimationFrame in a cross browser way.
+window.requestAnimFrame =
+    window.requestAnimationFrame ||
+    window.webkitRequestAnimationFrame ||
+    window.mozRequestAnimationFrame ||
+    window.oRequestAnimationFrame ||
+    window.msRequestAnimationFrame ||
+    function (callback) {
+        window.setTimeout(callback, 1e3 / 60);
+    };
 class Point {
     constructor(x, y, z) {
         this.x = this.px = x;
@@ -35,18 +67,18 @@ class Point {
             let dy = this.y - mouse.y;
             let dist = Math.sqrt(dx * dx + dy * dy);
 
-            if (mouse.button === 1 && dist < mouse.influence) {
+            if (mouse.button === 1 && dist < config.mouse.influence) {
                 this.px = this.x - (mouse.x - mouse.px);
                 this.py = this.y - (mouse.y - mouse.py);
-            } else if (dist < mouse.cut) {
+            } else if (dist < config.mouse.cut) {
                 this.free();
             }
         }
 
-        this.addForce(0, gravity, 0);
+        this.addForce(0, config.gravity, 0);
 
-        let nx = this.x + (this.x - this.px) * friction + this.vx * delta;
-        let ny = this.y + (this.y - this.py) * friction + this.vy * delta;
+        let nx = this.x + (this.x - this.px) * config.friction + this.vx * delta;
+        let ny = this.y + (this.y - this.py) * config.friction + this.vy * delta;
 
         this.px = this.x;
         this.py = this.y;
@@ -56,16 +88,20 @@ class Point {
 
         this.vy = this.vx = 0;
 
+        // Boundary collision with proper bounce
         if (this.x >= 1) {
-            this.px = 1 + (1 - this.px) * bounce;
+            this.px = 1 + (1 - this.px) * config.bounce;
             this.x = 1;
+        } else if (this.x <= -1) {
+            this.px = -1 + (-1 - this.px) * config.bounce;
+            this.x = -1;
         }
 
         if (this.y >= 1) {
-            this.py = 1 + (1 - this.py) * bounce;
+            this.py = 1 + (1 - this.py) * config.bounce;
             this.y = 1;
         } else if (this.y <= -1.0) {
-            this.py *= -1.0 * bounce;
+            this.py = -1.0 + (-1.0 - this.py) * config.bounce;
             this.y = -1.0;
         }
 
@@ -87,8 +123,17 @@ class Point {
     }
 
     free() {
+        // Remove this point from all constraints that reference it
+        this.constraints.forEach(constraint => {
+            // Remove this constraint from the other point
+            const otherPoint = constraint.p1 === this ? constraint.p2 : constraint.p1;
+            const index = otherPoint.constraints.indexOf(constraint);
+            if (index > -1) {
+                otherPoint.constraints.splice(index, 1);
+            }
+        });
         this.constraints = [];
-        cloth.removeIndex(this);
+        cloth.markForRemoval(this);
     }
 
     addForce(x, y, z) {
@@ -138,32 +183,29 @@ class Constraint {
 
 class Cloth {
     constructor() {
-        this.vertices = new Float32Array(((clothX + 1) * (clothY + 1)) * 3);
-        this.indices = new Uint32Array(this.vertices.length * 3);
+        this.vertices = new Float32Array(((config.clothX + 1) * (config.clothY + 1)) * 3);
+        this.indices = [];
         this.points = [];
+        this.removedPoints = new Set();
+        this.needsIndexUpdate = false;
 
         let cnt = 0;
-        for (let y = 0; y <= clothY; y++) {
-            for (let x = 0; x <= clothX; x++) {
-                let p = new Point(startX + x * spacing, startY - y * spacing, 0.0);
+        for (let y = 0; y <= config.clothY; y++) {
+            for (let x = 0; x <= config.clothX; x++) {
+                let p = new Point(
+                    config.startX + x * spacing, 
+                    config.startY - y * spacing, 
+                    0.0
+                );
 
-                y === 0 && p.pin(p.x, p.y);
-                x !== 0 && p.attach(this.points[this.points.length - 1]);
-                y !== 0 && p.attach(this.points[x + (y - 1) * (clothX + 1)]);
-
-                if (x !== clothX && y !== clothY) {
-                    let b = cnt;
-                    cnt *= 2;
-
-                    this.indices[cnt++] = this.points.length;
-                    this.indices[cnt++] = this.points.length + 1;
-                    this.indices[cnt++] = this.points.length + clothX + 1;
-                    this.indices[cnt++] = this.points.length + 1;
-                    this.indices[cnt++] = this.points.length + clothX + 1;
-                    this.indices[cnt++] = this.points.length + clothX + 2;
-
-                    cnt = b;
-                }
+                // Pin the top row
+                if (y === 0) p.pin(p.x, p.y);
+                
+                // Connect to left neighbor
+                if (x !== 0) p.attach(this.points[this.points.length - 1]);
+                
+                // Connect to top neighbor
+                if (y !== 0) p.attach(this.points[x + (y - 1) * (config.clothX + 1)]);
 
                 this.points.push(p);
                 this.vertices[cnt++] = p.x;
@@ -171,75 +213,57 @@ class Cloth {
                 this.vertices[cnt++] = p.z;
             }
         }
+
+        this.generateIndices();
     }
 
-    removeIndex(p) {
-        let pos = this.points.indexOf(p);
+    generateIndices() {
+        this.indices = [];
+        for (let y = 0; y < config.clothY; y++) {
+            for (let x = 0; x < config.clothX; x++) {
+                let i = x + y * (config.clothX + 1);
+                
+                // Skip removed points
+                if (this.removedPoints.has(i) || 
+                    this.removedPoints.has(i + 1) || 
+                    this.removedPoints.has(i + config.clothX + 1) ||
+                    this.removedPoints.has(i + config.clothX + 2)) {
+                    continue;
+                }
 
-        let pp = [
-            this.points[pos - clothX - 2],  // top-left
-            this.points[pos - clothX - 1],  // top-mid
-            this.points[pos - 1],           // mid-left
-            this.points[pos + 1],           // mid-right
-            this.points[pos + clothX],      // bot-left
-            this.points[pos + clothX + 1],  // bot-mid
-            this.points[pos + clothX + 2]   // bot-right
-        ];
+                // First triangle
+                this.indices.push(i, i + 1, i + config.clothX + 1);
+                // Second triangle
+                this.indices.push(i + 1, i + config.clothX + 1, i + config.clothX + 2);
+            }
+        }
+        this.needsIndexUpdate = true;
+    }
 
-        let ppp = [
-            pos - clothX - 2,
-            pos - clothX - 1,
-            pos - 1,
-            pos + 1,
-            pos + clothX,
-            pos + clothX + 1,
-            pos + clothX + 2
-        ];
-
-        let cnt = p * 6;
-
-        this.indices[cnt++] = pp[0] + 1;
-        this.indices[cnt++] = pp[0] + clothX + 1;
-        this.indices[cnt++] = pp[0] + clothX + 2;
-        this.indices[cnt++] = this.indices[cnt++] = this.indices[cnt++] = null;
-
-        cnt = ppp[0] * 6;
-
-        this.indices[cnt++] = pp[0];
-        this.indices[cnt++] = pp[0] + 1;
-        this.indices[cnt++] = pp[0] + clothX + 1;
-        this.indices[cnt++] = this.indices[cnt++] = this.indices[cnt++] = null;
-
-        cnt = ppp[1] * 6;
-
-        this.indices[cnt++] = pp[0];
-        this.indices[cnt++] = pp[0] + 1;
-        this.indices[cnt++] = pp[0] + clothX + 2;
-        this.indices[cnt++] = this.indices[cnt++] = this.indices[cnt++] = null;
-
-        cnt = ppp[2] * 6;
-
-        this.indices[cnt++] = pp[0];
-        this.indices[cnt++] = pp[0] + clothX + 1;
-        this.indices[cnt++] = pp[0] + clothX + 2;
-        this.indices[cnt++] = this.indices[cnt++] = this.indices[cnt++] = null;
-
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cloth.indices, gl.STATIC_DRAW);
+    markForRemoval(point) {
+        let index = this.points.indexOf(point);
+        if (index !== -1) {
+            this.removedPoints.add(index);
+            this.generateIndices();
+        }
     }
 
     update(delta) {
-        let i = accuracy;
+        let i = config.accuracy;
 
         while (i--) {
             this.points.forEach((point) => {
-                point.resolve();
+                if (!this.removedPoints.has(this.points.indexOf(point))) {
+                    point.resolve();
+                }
             });
         }
 
         let cnt = 0;
-        this.points.forEach((point) => {
-            point.update(delta);
+        this.points.forEach((point, index) => {
+            if (!this.removedPoints.has(index)) {
+                point.update(delta);
+            }
             this.vertices[cnt++] = point.x;
             this.vertices[cnt++] = point.y;
             this.vertices[cnt++] = point.z;
@@ -248,8 +272,8 @@ class Cloth {
 }
 
 let mouse = {
-    cut: 0.02,
-    influence: 0.08,
+    cut: config.mouse.cut,
+    influence: config.mouse.influence,
     down: false,
     button: 1,
     x: 0,
@@ -262,10 +286,8 @@ function setMouse(e) {
     let rect = canvas.getBoundingClientRect();
     mouse.px = mouse.x;
     mouse.py = mouse.y;
-    mouse.x = (e.x - rect.left) / canvas.width;
-    mouse.y = (canvas.height - (e.y - rect.top)) / canvas.height;
-    mouse.x = (mouse.x * 2.0) - 1.0;
-    mouse.y = (mouse.y * 2.0) - 1.0;
+    mouse.x = ((e.clientX - rect.left) / canvas.width) * 2.0 - 1.0;
+    mouse.y = ((canvas.height - (e.clientY - rect.top)) / canvas.height) * 2.0 - 1.0;
 }
 
 canvas.onmousedown = (e) => {
@@ -278,24 +300,107 @@ canvas.onmousemove = setMouse;
 canvas.onmouseup = () => (mouse.down = false);
 canvas.oncontextmenu = (e) => e.preventDefault();
 
+// Canvas resize handling
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    if (gl && resolutionID !== null) {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniform2f(resolutionID, canvas.width, canvas.height);
+    }
+}
+
+window.addEventListener('resize', resizeCanvas);
+
 let cloth = new Cloth();
 
 /////////////////////////////////////////////
 // RENDERER
 /////////////////////////////////////////////
-try {
-    gl = canvas.getContext('webgl');
+async function initWebGL() {
+    try {
+        gl = canvas.getContext('webgl');
+        
+        if (!gl) {
+            throw new Error("WebGL not supported");
+        }
 
-    let EXT = gl.getExtension("OES_element_index_uint") ||
-        gl.getExtension("MOZ_OES_element_index_uint") ||
-        gl.getExtension("WEBKIT_OES_element_index_uint");
+        let EXT = gl.getExtension("OES_element_index_uint") ||
+            gl.getExtension("MOZ_OES_element_index_uint") ||
+            gl.getExtension("WEBKIT_OES_element_index_uint");
 
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    //    gl.enable(gl.DEPTH_TEST);
-    //    gl.depthFunc(gl.LESS);
-    //    gl.enable(gl.CULL_FACE);
-} catch (e) {
-    console.error("It does not appear your computer can support WebGL.");
+        if (!EXT) {
+            console.warn("OES_element_index_uint extension not available");
+        }
+
+        gl.clearColor(0.0, 0.0, 0.0, 0.0);
+        
+        // Load shaders
+        const vertexShaderSource = await fetchHTTP("./shaders/vert.glsl");
+        const fragmentShaderSource = await fetchHTTP("./shaders/frag.glsl");
+        
+        if (!vertexShaderSource || !fragmentShaderSource) {
+            throw new Error("Failed to load shaders");
+        }
+
+        let vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertexShader, vertexShaderSource);
+        gl.compileShader(vertexShader);
+        
+        if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+            throw new Error("Vertex shader compilation error: " + gl.getShaderInfoLog(vertexShader));
+        }
+
+        let fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fragmentShader, fragmentShaderSource);
+        gl.compileShader(fragmentShader);
+        
+        if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+            throw new Error("Fragment shader compilation error: " + gl.getShaderInfoLog(fragmentShader));
+        }
+
+        let program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            throw new Error("Shader program linking error: " + gl.getProgramInfoLog(program));
+        }
+        
+        gl.useProgram(program);
+
+        // Get uniform and attribute locations
+        orthoMatrixID = gl.getUniformLocation(program, "u_ortho");
+        modelMatrixID = gl.getUniformLocation(program, "u_model");
+        viewMatrixID = gl.getUniformLocation(program, "u_view");
+        timeID = gl.getUniformLocation(program, "u_time");
+        resolutionID = gl.getUniformLocation(program, "u_resolution");
+        a_PostionID = gl.getAttribLocation(program, "a_position");
+
+        // Create buffers
+        indicesbuffer = gl.createBuffer();
+        vertexbuffer = gl.createBuffer();
+
+        // Set initial uniforms
+        gl.uniform2f(resolutionID, canvas.width, canvas.height);
+        gl.uniformMatrix4fv(orthoMatrixID, false, orthoMatrix);
+        gl.uniformMatrix4fv(viewMatrixID, false, viewMatrix);
+        gl.uniformMatrix4fv(modelMatrixID, false, [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ]);
+
+        // Initialize render mode after WebGL is ready
+        render_mode = gl.POINTS;
+
+        return true;
+    } catch (error) {
+        console.error("WebGL initialization failed:", error);
+        return false;
+    }
 }
 
 function CreateViewMatrix(position, direction, up) {
@@ -365,40 +470,9 @@ function CreateOrthoMatrix(l, r, b, t, n, f) {
 let orthoMatrix = CreateOrthoMatrix(-1.0, 1.0, -1.0, 1.0, 0.1, 1024.0);
 var viewMatrix = CreateViewMatrix([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]);
 
-let vertexShader = gl.createShader(gl.VERTEX_SHADER);
-gl.shaderSource(vertexShader, fetchHTTP("./shaders/vert.glsl"));
-gl.compileShader(vertexShader);
-
-let fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
-gl.shaderSource(fragmentShader, fetchHTTP("./shaders/frag.glsl"));
-gl.compileShader(fragmentShader);
-
-let program = gl.createProgram();
-gl.attachShader(program, vertexShader);
-gl.attachShader(program, fragmentShader);
-gl.linkProgram(program);
-gl.useProgram(program);
-
-let orthoMatrixID = gl.getUniformLocation(program, "u_ortho");
-let modelMatrixID = gl.getUniformLocation(program, "u_model");
-let viewMatrixID = gl.getUniformLocation(program, "u_view");
-let timeID = gl.getUniformLocation(program, "u_time");
-let resolutionID = gl.getUniformLocation(program, "u_resolution");
-let a_PostionID = gl.getAttribLocation(program, "a_position");
-
-let indicesbuffer = gl.createBuffer();
-gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
-gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cloth.indices, gl.STATIC_DRAW);
-
-gl.uniform2f(resolutionID, canvas.width, canvas.height);
-gl.uniformMatrix4fv(orthoMatrixID, false, orthoMatrix);
-gl.uniformMatrix4fv(viewMatrixID, false, viewMatrix);
-gl.uniformMatrix4fv(modelMatrixID, false, [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0
-]);
+// WebGL variables
+let orthoMatrixID, modelMatrixID, viewMatrixID, timeID, resolutionID, a_PostionID;
+let indicesbuffer, vertexbuffer;
 
 // @mrdoob Performance Monitor
 let stats = new Stats();
@@ -408,20 +482,9 @@ document.body.appendChild(stats.dom);
 let loadTime = Date.now();
 let lastTime = loadTime;
 let nbFrames = 0;
-let vertexbuffer = gl.createBuffer();
 
-let render_mode = gl.POINTS;
-document.addEventListener("keypress", function (key) {
-    if (key.key === 'w') {
-        render_mode = render_mode === gl.POINTS ? gl.TRIANGLES : gl.POINTS;
-    } else if (key.key === 'g') {
-        gravity = gravity ? 0 : -0.02;
-    } else if (key.key === 'r') {
-        cloth = new Cloth();
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, cloth.indices, gl.STATIC_DRAW);
-    }
-});
+// Will be set after WebGL initialization
+let render_mode;
 
 function render() {
     let currentTime = Date.now();
@@ -434,10 +497,17 @@ function render() {
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
+    // Update index buffer if needed
+    if (cloth.needsIndexUpdate) {
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(cloth.indices), gl.STATIC_DRAW);
+        cloth.needsIndexUpdate = false;
+    }
+
     // 1st attribute buffer : vertices
     gl.enableVertexAttribArray(a_PostionID);
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexbuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, cloth.vertices, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, cloth.vertices, gl.DYNAMIC_DRAW);
     gl.vertexAttribPointer(a_PostionID, 3, gl.FLOAT, false, 0, 0);
 
     // Time Uniform
@@ -447,13 +517,50 @@ function render() {
     gl.flush();
 }
 
-(function update() {
-    stats.begin();
+async function startSimulation() {
+    const initialized = await initWebGL();
+    if (!initialized) {
+        document.body.innerHTML = "<h1>WebGL not supported or failed to initialize</h1>";
+        return;
+    }
 
-    cloth.update(0.032);
-    render();
+    // Set up keyboard controls after WebGL is initialized
+    document.addEventListener("keypress", function (key) {
+        if (key.key === 'w') {
+            render_mode = render_mode === gl.POINTS ? gl.TRIANGLES : gl.POINTS;
+        } else if (key.key === 'g') {
+            config.gravity = config.gravity ? 0 : -0.02;
+        } else if (key.key === 'r') {
+            cloth = new Cloth();
+            // Update index buffer
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(cloth.indices), gl.STATIC_DRAW);
+        }
+    });
 
-    stats.end();
+    // Initial index buffer setup
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indicesbuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(cloth.indices), gl.STATIC_DRAW);
 
-    window.requestAnimFrame(update);
-})();
+    let lastFrameTime = performance.now();
+
+    function update() {
+        stats.begin();
+
+        const currentTime = performance.now();
+        const deltaTime = Math.min((currentTime - lastFrameTime) / 1000.0, 1/30); // Cap at 30fps for stability
+        lastFrameTime = currentTime;
+
+        cloth.update(deltaTime);
+        render();
+
+        stats.end();
+
+        window.requestAnimFrame(update);
+    }
+
+    update();
+}
+
+// Start the simulation
+startSimulation();
