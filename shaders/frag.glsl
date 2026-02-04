@@ -7,7 +7,7 @@ uniform float u_time;
 
 varying vec3 v_position;
 
-void main()
+void main()a
 {
-    gl_FragColor = vec4(0.0, 0.8, 0.4, v_position.y);
+    gl_FragColor = vec4(0.0, 0.8, 0.4, 1.0);
 }
